@@ -1,0 +1,7 @@
+{
+  "gr4vyId": "spider",
+  "server": "sandbox",
+  "merchantAccountId": "default",
+  "privateKeyPath": "./private_key.pem",
+  "port": 3000
+}
