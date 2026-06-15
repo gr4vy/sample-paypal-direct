@@ -58,20 +58,14 @@ app.get("/config", (_req, res) => {
   res.json({ apiUrl });
 });
 
-// Standalone PayPal session — returns the render config (clientId, merchantId,
-// currency, intent, fundingSource) WITHOUT creating a transaction or calling
-// PayPal. This is what lets the button render on page load with no side
-// effects. The same shape comes back from the per-transaction session, minus
-// the orderId (which only exists once an order is created).
-app.get("/paypal-session", async (req, res) => {
-  const { currency = "USD", intent = "capture" } = req.query;
+// Standalone PayPal session — returns the connector-held clientId and
+// merchantId WITHOUT creating a transaction or calling PayPal. This is what
+// lets the button render on page load with no side effects. The client picks
+// currency, intent, and funding source itself when loading the SDK.
+app.get("/paypal-session", async (_req, res) => {
   try {
-    const session = await gr4vy.paymentServices.session(
-      { currency, intent },
-      cfg.paymentServiceId,
-    );
-    // session.responseBody is { clientId, merchantId, currency, intent,
-    // fundingSource } — no orderId.
+    const session = await gr4vy.paymentServices.session({}, cfg.paymentServiceId);
+    // session.responseBody is { clientId, merchantId } — no orderId.
     res.json(session.responseBody ?? {});
   } catch (err) {
     console.error("paymentServices.session failed:", err);

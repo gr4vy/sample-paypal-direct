@@ -70,9 +70,8 @@ To point at a different Gr4vy environment, copy `config.example.json` to
         │  proxies POST             │                          │
         │  /payment-services/       │                          │
         │  {id}/sessions            │                          │
-        │   ──→ clientId, currency, │                          │
-        │       intent, merchantId, │                          │
-        │       fundingSource       │                          │
+        │   ──→ clientId,           │                          │
+        │       merchantId          │                          │
         │       (NO orderId)        │                          │
         │                            │                          │
         │                       2.   │  GET paypal.com/sdk/js  │
@@ -100,45 +99,39 @@ To point at a different Gr4vy environment, copy `config.example.json` to
 
 ### Step 1 — Fetch the standalone session (server proxy, on page load)
 
-The standalone session endpoint returns PayPal's render config without
-creating a transaction or calling PayPal. Unlike the per-transaction session
-(step 3), it requires a **full Gr4vy bearer token** (scope
-`transactions.write`), so it must be called server-side where the private key
-lives. The SDK exposes it as `gr4vy.paymentServices.session`:
+The standalone session endpoint returns the connector-held `clientId` and
+`merchantId` without creating a transaction or calling PayPal. Unlike the
+per-transaction session (step 3), it requires a **full Gr4vy bearer token**
+(scope `transactions.write`), so it must be called server-side where the
+private key lives. The SDK exposes it as `gr4vy.paymentServices.session`:
 
 ```js
 // server.js
-const session = await gr4vy.paymentServices.session(
-  { currency: "USD", intent: "capture" },
-  cfg.paymentServiceId,
-);
+const session = await gr4vy.paymentServices.session({}, cfg.paymentServiceId);
 res.json(session.responseBody);
 ```
 
-You get back the same shape as the per-transaction session, **minus the
-`orderId`**:
+You get back just the two ids:
 
 ```json
 {
   "clientId": "AegRgM...",
-  "merchantId": null,
-  "currency": "USD",
-  "intent": "capture",
-  "fundingSource": "paypal.FUNDING.PAYPAL"
+  "merchantId": null
 }
 ```
 
 ### Step 2 — Load the SDK and render the button (client, on page load)
 
-Inject the PayPal JS SDK using the `clientId`, `currency`, and `intent` from
-the session, then render the Smart Button. **No transaction exists yet.**
-`intent` is required — PayPal refuses to render if it doesn't match the order's
-intent. `merchant-id` is only needed for multi-party / marketplace setups; omit
-it when the session returns `null`.
+Inject the PayPal JS SDK using the `clientId` from the session, then render the
+Smart Button. **No transaction exists yet.** You choose the `currency` and
+`intent` yourself — they are not part of the session — and the `intent` must
+match the intent of the transaction you create on click. `merchant-id` is only
+needed for multi-party / marketplace setups; omit it when the session returns
+`merchantId` as `null`.
 
 ```js
-const params = new URLSearchParams({ "client-id": clientId, currency });
-if (intent) params.set("intent", intent);
+const params = new URLSearchParams({ "client-id": clientId, currency: CURRENCY });
+params.set("intent", INTENT);
 if (merchantId) params.set("merchant-id", merchantId);
 // inject <script src="https://www.paypal.com/sdk/js?...">
 ```
@@ -202,12 +195,14 @@ navigates to the completion URL.
   bearer token, so the browser can't call it directly. The per-transaction
   session (step 3) is the one that's safe to call from the browser, authed by
   the short-lived `sessionToken`.
-- **`intent` must match.** The session returns the connector's intent; pass
-  that exact value to the SDK URL and the order uses the same intent.
+- **The session returns only `clientId` and `merchantId`.** Currency, intent,
+  and funding source aren't in it — you choose them client-side. Keep the SDK
+  `intent` the same as the intent of the transaction you create on click, or
+  PayPal rejects the order.
 - **Omit `merchant-id` when `merchantId` is null.** Including
   `&merchant-id=null` causes a 400 from `paypal.com/sdk/js`.
-- **`fundingSource` is a path string** (`"paypal.FUNDING.PAYPAL"`) — resolve
-  via `window.paypal.FUNDING[...]` before passing to `paypal.Buttons`.
+- **The funding source is `paypal.FUNDING.PAYPAL`** — resolve it via
+  `window.paypal.FUNDING[...]` before passing to `paypal.Buttons`.
 - **Webhooks are recommended for production.** This sample relies on the
   redirect-back to know the result, which is fine for a demo but can drop on
   network errors. In production, listen for transaction webhooks and treat the

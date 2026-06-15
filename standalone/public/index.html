@@ -95,6 +95,13 @@
       const statusEl = document.getElementById("status");
       const buttonContainer = document.getElementById("paypal-button-container");
 
+      // The client chooses these — they are not part of the standalone session,
+      // which only returns the clientId and merchantId. INTENT must match the
+      // intent of the transaction created on click.
+      const CURRENCY = "USD";
+      const INTENT = "capture";
+      const FUNDING_SOURCE = "paypal.FUNDING.PAYPAL";
+
       function setStatus(msg, kind) {
         statusEl.hidden = false;
         statusEl.textContent = msg;
@@ -103,17 +110,18 @@
 
       // Step 1 — fetch the standalone PayPal session. Our server proxies the
       // payment-service session endpoint (it needs a private-key-signed token,
-      // so it can't be called from the browser). No transaction is created.
+      // so it can't be called from the browser). Returns { clientId,
+      // merchantId } only — no transaction is created.
       async function fetchStandaloneSession() {
-        const r = await fetch("/paypal-session?currency=USD&intent=capture");
+        const r = await fetch("/paypal-session");
         if (!r.ok) throw new Error(`GET /paypal-session ${r.status}`);
         return r.json();
       }
 
-      // Step 2 — inject the PayPal JS SDK with parameters from the session.
-      // `intent` must match the order's intent (authorize/capture) or PayPal
-      // refuses to render. `merchant-id` is only used in multi-party setups
-      // and is omitted when the session returns it as null.
+      // Step 2 — inject the PayPal JS SDK. `intent` must match the order's
+      // intent (authorize/capture) or PayPal refuses to render. `merchant-id`
+      // is only used in multi-party setups and is omitted when the session
+      // returns it as null.
       function loadPayPalSdk({ clientId, currency, intent, merchantId }) {
         return new Promise((resolve, reject) => {
           const params = new URLSearchParams({ "client-id": clientId, currency });
@@ -146,7 +154,7 @@
         const txRes = await fetch("/transactions", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ amount: 1299, currency: "USD", country: "US" }),
+          body: JSON.stringify({ amount: 1299, currency: CURRENCY, country: "US" }),
         });
         if (!txRes.ok) throw new Error(`POST /transactions ${txRes.status}`);
         const { transactionId, sessionToken } = await txRes.json();
@@ -195,12 +203,17 @@
         try {
           // Step 1: fetch the standalone session — no transaction created.
           setStatus("Fetching PayPal session...");
-          const { clientId, currency, merchantId, intent, fundingSource } =
-            await fetchStandaloneSession();
+          const { clientId, merchantId } = await fetchStandaloneSession();
 
           // Step 2: load the PayPal JS SDK and render — still no transaction.
+          // currency and intent are our own choices, not from the session.
           setStatus("Loading PayPal SDK...");
-          await loadPayPalSdk({ clientId, currency, intent, merchantId });
+          await loadPayPalSdk({
+            clientId,
+            currency: CURRENCY,
+            intent: INTENT,
+            merchantId,
+          });
           statusEl.hidden = true;
 
           // Step 3/4: render the Smart Button. createOrder creates the
@@ -209,7 +222,7 @@
           // ?transaction_id=...&transaction_status=... in the query string.
           window.paypal
             .Buttons({
-              fundingSource: resolveFundingSource(fundingSource),
+              fundingSource: resolveFundingSource(FUNDING_SOURCE),
               createOrder: async () => {
                 setStatus("Creating order...");
                 const orderId = await createOrderLazily();

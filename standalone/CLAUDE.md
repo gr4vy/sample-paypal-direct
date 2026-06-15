@@ -32,12 +32,12 @@ component library, or an abstraction layer — don't. Ask first.
 ## The five-step flow (in code order)
 
 1. `server.js` `GET /paypal-session` — proxies
-   `gr4vy.paymentServices.session({ currency, intent }, paymentServiceId)`
+   `gr4vy.paymentServices.session({}, paymentServiceId)`
    (i.e. `POST /payment-services/{id}/sessions`). Returns `responseBody`:
-   `{ clientId, merchantId, currency, intent, fundingSource }` — **no orderId,
-   no transaction, no PayPal call.**
+   `{ clientId, merchantId }` — **no orderId, no transaction, no PayPal call.**
 2. `public/index.html` `loadPayPalSdk()` — injects
-   `<script src="paypal.com/sdk/js?...">` and renders the button. No
+   `<script src="paypal.com/sdk/js?...">` with the `clientId` plus the
+   client-chosen `CURRENCY`/`INTENT` constants, and renders the button. No
    transaction yet.
 3. `createOrderLazily()` (inside `createOrder`) — on click: `POST
    /transactions`, then `POST {apiUrl}/transactions/:id/session?token=...` from
