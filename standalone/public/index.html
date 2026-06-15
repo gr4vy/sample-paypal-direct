@@ -97,9 +97,11 @@
 
       // The client chooses these — they are not part of the standalone session,
       // which only returns the clientId and merchantId. INTENT must match the
-      // intent of the transaction created on click.
+      // intent configured on your PayPal connection in Gr4vy (the connection
+      // controls the PayPal order's intent). The spider sandbox connection is
+      // set to authorize; change this to "capture" if your connection captures.
       const CURRENCY = "USD";
-      const INTENT = "capture";
+      const INTENT = "authorize";
       const FUNDING_SOURCE = "paypal.FUNDING.PAYPAL";
 
       function setStatus(msg, kind) {
@@ -154,7 +156,14 @@
         const txRes = await fetch("/transactions", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ amount: 1299, currency: CURRENCY, country: "US" }),
+          // Send the same intent we loaded the SDK with, so the PayPal order's
+          // intent matches — otherwise PayPal rejects the order on click.
+          body: JSON.stringify({
+            amount: 1299,
+            currency: CURRENCY,
+            country: "US",
+            intent: INTENT,
+          }),
         });
         if (!txRes.ok) throw new Error(`POST /transactions ${txRes.status}`);
         const { transactionId, sessionToken } = await txRes.json();

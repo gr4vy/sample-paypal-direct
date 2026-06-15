@@ -81,12 +81,21 @@ app.get("/paypal-session", async (_req, res) => {
 //                    per-transaction session (orderId, default_completion_url)
 //                    directly from the Gr4vy API
 app.post("/transactions", async (req, res) => {
-  const { amount = 1299, currency = "USD", country = "US" } = req.body ?? {};
+  const {
+    amount = 1299,
+    currency = "USD",
+    country = "US",
+    intent = "capture",
+  } = req.body ?? {};
   try {
     const tx = await gr4vy.transactions.create({
       amount,
       currency,
       country,
+      // Mirror the intent the client loaded the SDK with. Note the PayPal
+      // order's intent is ultimately governed by your PayPal connection's
+      // configuration, so the SDK intent must match that connection setting.
+      intent,
       integrationClient: "web",
       paymentMethod: {
         method: "paypal",
