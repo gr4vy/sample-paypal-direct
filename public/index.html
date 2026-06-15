@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Gr4vy + PayPal direct mode sample</title>
+    <title>Gr4vy + PayPal standalone session sample</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <style>
       :root {
@@ -61,7 +61,7 @@
     </style>
   </head>
   <body>
-    <h1>Gr4vy + PayPal direct mode</h1>
+    <h1>Gr4vy + PayPal standalone session</h1>
     <div class="product">
       <div>Sample item</div>
       <div class="price">$12.99 USD</div>
@@ -71,24 +71,38 @@
 
     <script>
       // -----------------------------------------------------------------
-      // Gr4vy + PayPal direct integration on web
+      // Gr4vy + PayPal standalone session on web
       //
-      // The flow is:
-      //   1. Server creates a PayPal transaction. Returns { transactionId,
-      //      sessionToken }.
-      //   2. Client POSTs the sessionToken to Gr4vy's session endpoint and
-      //      gets back { orderId, clientId, currency, intent, fundingSource }
-      //      plus a default_completion_url.
-      //   3. Client loads paypal.com/sdk/js with the clientId, currency, and
-      //      intent, then renders the PayPal Smart Button.
-      //   4. On approval, the browser is sent to default_completion_url. That
-      //      URL 303-redirects back to our page with the transaction result
-      //      in the query string.
+      // The defining feature: NO transaction is created to render the button.
+      // A transaction (and PayPal order) is created lazily, only when the
+      // buyer clicks, inside PayPal's createOrder callback.
+      //
+      //   1. Page load: fetch the standalone PayPal session from our server
+      //      (which proxies POST /payment-services/{id}/sessions). Returns
+      //      { clientId, merchantId, currency, intent, fundingSource } — no
+      //      orderId, no transaction.
+      //   2. Load paypal.com/sdk/js with the clientId/currency/intent and
+      //      render the Smart Button. Still no transaction.
+      //   3. On click, createOrder creates the Gr4vy transaction + PayPal
+      //      order: POST /transactions, then POST the per-transaction session
+      //      to get the orderId and default_completion_url. Returns orderId.
+      //   4. On approval, the browser is sent to default_completion_url, which
+      //      303-redirects back with the transaction result in the query
+      //      string.
       //   5. On return, the page fetches the transaction status and shows it.
       // -----------------------------------------------------------------
 
       const statusEl = document.getElementById("status");
       const buttonContainer = document.getElementById("paypal-button-container");
+
+      // The client chooses these — they are not part of the standalone session,
+      // which only returns the clientId and merchantId. INTENT must match the
+      // intent configured on your PayPal connection in Gr4vy (the connection
+      // controls the PayPal order's intent). The spider sandbox connection is
+      // set to authorize; change this to "capture" if your connection captures.
+      const CURRENCY = "USD";
+      const INTENT = "authorize";
+      const FUNDING_SOURCE = "paypal.FUNDING.PAYPAL";
 
       function setStatus(msg, kind) {
         statusEl.hidden = false;
@@ -96,32 +110,20 @@
         statusEl.className = kind || "";
       }
 
-      // Step 1 — our server wraps the Gr4vy SDK's transactions.create.
-      async function createTransaction() {
-        const r = await fetch("/transactions", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ amount: 1299, currency: "USD", country: "US" }),
-        });
-        if (!r.ok) throw new Error(`POST /transactions ${r.status}`);
+      // Step 1 — fetch the standalone PayPal session. Our server proxies the
+      // payment-service session endpoint (it needs a private-key-signed token,
+      // so it can't be called from the browser). Returns { clientId,
+      // merchantId } only — no transaction is created.
+      async function fetchStandaloneSession() {
+        const r = await fetch("/paypal-session");
+        if (!r.ok) throw new Error(`GET /paypal-session ${r.status}`);
         return r.json();
       }
 
-      // Step 2 — the session endpoint is meant to be called from the frontend
-      // and is auth'd by the short-lived sessionToken (no private key needed).
-      async function fetchPayPalSession(apiUrl, transactionId, sessionToken) {
-        const url =
-          `${apiUrl}/transactions/${transactionId}/session` +
-          `?token=${encodeURIComponent(sessionToken)}`;
-        const r = await fetch(url, { method: "POST" });
-        if (!r.ok) throw new Error(`session ${r.status}`);
-        return r.json();
-      }
-
-      // Step 3 — inject the PayPal JS SDK with parameters from the session.
-      // `intent` must match the order's intent (authorize/capture) or PayPal
-      // refuses to render. `merchant-id` is only used in multi-party setups
-      // and is omitted when the session returns it as null.
+      // Step 2 — inject the PayPal JS SDK. `intent` must match the order's
+      // intent (authorize/capture) or PayPal refuses to render. `merchant-id`
+      // is only used in multi-party setups and is omitted when the session
+      // returns it as null.
       function loadPayPalSdk({ clientId, currency, intent, merchantId }) {
         return new Promise((resolve, reject) => {
           const params = new URLSearchParams({ "client-id": clientId, currency });
@@ -143,6 +145,42 @@
           return window.paypal.FUNDING[value.split(".").pop()];
         }
         return value;
+      }
+
+      // Step 3 — create the transaction + PayPal order lazily, on click. This
+      // is the only place a transaction is created. It returns the orderId
+      // PayPal needs, and stashes the completion URL for onApprove.
+      let defaultCompletionUrl = null;
+      async function createOrderLazily() {
+        // 3a. Server creates the Gr4vy transaction (needs the private key).
+        const txRes = await fetch("/transactions", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          // Send the same intent we loaded the SDK with, so the PayPal order's
+          // intent matches — otherwise PayPal rejects the order on click.
+          body: JSON.stringify({
+            amount: 1299,
+            currency: CURRENCY,
+            country: "US",
+            intent: INTENT,
+          }),
+        });
+        if (!txRes.ok) throw new Error(`POST /transactions ${txRes.status}`);
+        const { transactionId, sessionToken } = await txRes.json();
+
+        // 3b. Exchange the session token for the per-transaction session,
+        // directly from the browser (auth'd by the short-lived token). This is
+        // where the orderId and default_completion_url come from.
+        const { apiUrl } = await (await fetch("/config")).json();
+        const sessUrl =
+          `${apiUrl}/transactions/${transactionId}/session` +
+          `?token=${encodeURIComponent(sessionToken)}`;
+        const sessRes = await fetch(sessUrl, { method: "POST" });
+        if (!sessRes.ok) throw new Error(`session ${sessRes.status}`);
+        const { session_data, default_completion_url } = await sessRes.json();
+
+        defaultCompletionUrl = default_completion_url;
+        return session_data.orderId;
       }
 
       // Step 5 — display the final transaction status on return from PayPal.
@@ -171,31 +209,35 @@
       }
 
       async function renderPayPalButton() {
-        setStatus("Creating transaction...");
         try {
-          // Step 1: server creates the Gr4vy transaction.
-          const { transactionId, sessionToken } = await createTransaction();
-
-          // Step 2: client exchanges the session token for PayPal session data.
+          // Step 1: fetch the standalone session — no transaction created.
           setStatus("Fetching PayPal session...");
-          const { apiUrl } = await (await fetch("/config")).json();
-          const session = await fetchPayPalSession(apiUrl, transactionId, sessionToken);
-          const { orderId, clientId, currency, merchantId, intent, fundingSource } =
-            session.session_data;
-          const defaultCompletionUrl = session.default_completion_url;
+          const { clientId, merchantId } = await fetchStandaloneSession();
 
-          // Step 3: load the PayPal JS SDK.
+          // Step 2: load the PayPal JS SDK and render — still no transaction.
+          // currency and intent are our own choices, not from the session.
           setStatus("Loading PayPal SDK...");
-          await loadPayPalSdk({ clientId, currency, intent, merchantId });
+          await loadPayPalSdk({
+            clientId,
+            currency: CURRENCY,
+            intent: INTENT,
+            merchantId,
+          });
           statusEl.hidden = true;
 
-          // Step 4: render the Smart Button. On approve, navigate the buyer
-          // to the completion URL — it 303-redirects back to our page with
+          // Step 3/4: render the Smart Button. createOrder creates the
+          // transaction + order on click; onApprove navigates the buyer to the
+          // completion URL, which 303-redirects back to our page with
           // ?transaction_id=...&transaction_status=... in the query string.
           window.paypal
             .Buttons({
-              fundingSource: resolveFundingSource(fundingSource),
-              createOrder: () => orderId,
+              fundingSource: resolveFundingSource(FUNDING_SOURCE),
+              createOrder: async () => {
+                setStatus("Creating order...");
+                const orderId = await createOrderLazily();
+                statusEl.hidden = true;
+                return orderId;
+              },
               onApprove: () => {
                 setStatus("Completing transaction...");
                 window.location.assign(defaultCompletionUrl);

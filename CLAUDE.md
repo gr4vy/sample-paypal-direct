@@ -6,13 +6,13 @@ things here that aren't useful in the README itself.
 
 ## What this repo is
 
-A self-contained sample of **Gr4vy's PayPal direct integration on web**. The
-merchant loads the PayPal JS SDK on their own checkout page and renders the
-Smart Button against an order Gr4vy has already created at PayPal.
+A self-contained sample of **Gr4vy's PayPal direct integration on web**, using
+the **standalone session** flow. The PayPal Smart Button renders on page load
+with **no transaction created**; the transaction and PayPal order are created
+lazily, only when the buyer clicks, inside PayPal's `createOrder` callback.
 
-This is *not* the simpler redirect-to-paypal.com flow. The distinguishing
-feature is that PayPal's SDK runs on the merchant's page, driven by session
-data fetched from Gr4vy.
+This is *not* the simpler redirect-to-paypal.com flow. PayPal's SDK runs on the
+merchant's page, driven by config fetched from Gr4vy.
 
 ## Stack constraints (do not change without asking)
 
@@ -29,75 +29,75 @@ component library, or an abstraction layer — don't. Ask first.
 
 ## The five-step flow (in code order)
 
-1. `server.js` `POST /transactions` — calls `gr4vy.transactions.create` with
-   `integrationClient: "web"`, `method: "paypal"`. Returns `transactionId` +
-   `sessionToken`.
-2. `public/index.html` `fetchPayPalSession()` — POSTs to
-   `{apiUrl}/transactions/:id/session?token=...` directly from the browser.
-   Returns `session_data` (orderId, clientId, currency, intent,
-   fundingSource, merchantId) and `default_completion_url`.
-3. `loadPayPalSdk()` — injects `<script src="paypal.com/sdk/js?...">` with
-   `client-id`, `currency`, `intent`, optionally `merchant-id`.
-4. `renderPayPalButton()` — `paypal.Buttons({ createOrder: () => orderId,
-   onApprove: () => navigate to default_completion_url })`.
+1. `server.js` `GET /paypal-session` — proxies
+   `gr4vy.paymentServices.session({}, paymentServiceId)`
+   (i.e. `POST /payment-services/{id}/sessions`). Returns `responseBody`:
+   `{ clientId, merchantId }` — **no orderId, no transaction, no PayPal call.**
+2. `public/index.html` `loadPayPalSdk()` — injects
+   `<script src="paypal.com/sdk/js?...">` with the `clientId` plus the
+   client-chosen `CURRENCY`/`INTENT` constants, and renders the button. No
+   transaction yet.
+3. `createOrderLazily()` (inside `createOrder`) — on click: `POST
+   /transactions`, then `POST {apiUrl}/transactions/:id/session?token=...` from
+   the browser to get the `orderId` + `default_completion_url`. Returns the
+   `orderId`.
+4. `onApprove` — navigate the browser to `default_completion_url`.
 5. On return, the URL has `?transaction_id=...&transaction_status=...`; the
    page calls `GET /transactions/:id` and shows the status.
 
-## Non-obvious things we already learned the hard way
+## Why the standalone session is server-side
 
-These are landmines that look fine in the docs but break in practice:
+The per-transaction session (`/transactions/:id/session?token=`) is authed by
+a short-lived `sessionToken` and is safe to call from the browser. The
+**standalone** session (`/payment-services/{id}/sessions`) requires a full
+Gr4vy bearer token (scope `transactions.write`), which is minted from the
+private key — so it must be proxied through the server. That's the one extra
+route this sample has over a plain transaction-first integration.
 
-- **`country` and `currency` are required on the `paymentMethod` object**
-  (not just at the top level of `transactions.create`). The SDK's Zod schema
+## Non-obvious things we learned the hard way
+
+- **`country` and `currency` are required on the `paymentMethod` object** of
+  `transactions.create`, not just at the top level. The SDK's Zod schema
   rejects without them.
-- **Pass `intent` to the PayPal SDK URL** (e.g. `&intent=authorize`). If you
-  omit it, PayPal renders fine but throws `Expected intent from order api
-  call to be capture, got authorize` on click.
+- **`intent` is governed by the PayPal connection, not the transaction.** The
+  order's intent comes from the connection's configuration in Gr4vy; passing a
+  different `intent` on `transactions.create` does not change it. Load the SDK
+  with the connection's intent (the spider sandbox connection is `authorize`)
+  or PayPal throws `Expected intent from order api call to be capture, got
+  authorize` on click.
 - **Omit `merchant-id` when the session returns `merchantId: null`.**
-  Including `&merchant-id=null` causes a 400 from `paypal.com/sdk/js`.
-  `merchantId` is only used in multi-party / marketplace setups.
-- **`fundingSource` comes back as a path string** (`"paypal.FUNDING.PAYPAL"`)
-  — resolve via `window.paypal.FUNDING[...]` before passing to
-  `paypal.Buttons`.
-- **In `onApprove`, navigate the browser to `default_completion_url`. Do not
-  `fetch()` it.** The URL 303-redirects across origins (api.sandbox →
-  localhost) and a cross-origin fetch chain fails with "Failed to fetch".
-  Navigation is also the documented pattern.
-- **The session endpoint is intentionally outside the SDK** — the Gr4vy
-  TypeScript SDK doesn't expose it. Call it with a plain `fetch` from the
-  browser, auth'd by the `sessionToken` query param. No private key needed
-  on the client side.
+  `&merchant-id=null` causes a 400 from `paypal.com/sdk/js`.
+- **`fundingSource` is a path string** (`"paypal.FUNDING.PAYPAL"`) — resolve
+  via `window.paypal.FUNDING[...]`.
+- **In `onApprove`, navigate to `default_completion_url`. Do not `fetch()`
+  it** — the redirect crosses origins and a fetch chain fails.
 
 ## Config and secrets
 
-- Defaults live in `config.example.json` (committed). Pointed at the
-  **Spider sandbox** (`gr4vyId: "spider"`, `server: "sandbox"`, merchant
-  account `default`). The server reads `config.json` if it exists,
-  otherwise falls back to the example.
-- `private_key.pem` is gitignored and required at runtime. The Gr4vy SDK
-  reads it on every request to sign a JWT.
-- `.gitignore` already covers `private_key.pem`, `config.json`, `.env`,
+- Defaults live in `config.example.json` (committed), pointed at the **Spider
+  sandbox**. The sample needs a **`paymentServiceId`** (the PayPal connection's
+  id) — the example ships a placeholder that the user must replace in
+  `config.json`.
+- `private_key.pem` is gitignored and required at runtime.
+- `.gitignore` covers `private_key.pem`, `config.json`, `.env`,
   `node_modules/`. **Never** commit a key or a populated `config.json`.
 
 ## Running and testing
 
 - `npm install && npm start` — boots Express on port 3000.
-- The page renders the PayPal button on load (no "Pay with PayPal" launcher
-  button — that was an earlier iteration).
+- The button renders on load with **no transaction**. Verify in the dashboard
+  that loading the page creates nothing; clicking creates exactly one
+  transaction.
 - To simulate the return path without going through PayPal:
-  `http://localhost:3000/?transaction_id=<any-real-tx-id>` — the page will
-  call `GET /transactions/:id` and display the status.
-- There are no automated tests. If you make non-trivial changes, run through
-  a real sandbox payment with a PayPal sandbox buyer account.
+  `http://localhost:3000/?transaction_id=<any-real-tx-id>`.
+- There are no automated tests. For non-trivial changes, run a real sandbox
+  payment with a PayPal sandbox buyer account.
 
 ## When making changes
 
-- **Don't expand scope.** If the user asks for a small fix, do exactly that.
-  This repo is intentionally tiny.
-- **Keep comments to the why, not the what.** The flow comments in
-  `index.html` and `server.js` exist because the *order* of API calls is the
-  hard part to remember; the code itself is self-explanatory.
+- **Don't expand scope.** This repo is intentionally tiny.
+- **Keep comments to the why, not the what.**
 - **The README is a teaching document.** If you change the flow, update the
-  step-by-step section and any code snippets in it that drift.
-- **Don't add error UI** unless asked. Sample apps are clearer when the
-  happy path is uncluttered. Surface failures as a single status line.
+  step-by-step section.
+- **Don't add error UI** unless asked. Surface failures as a single status
+  line.

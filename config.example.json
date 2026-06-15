@@ -2,6 +2,7 @@
   "gr4vyId": "spider",
   "server": "sandbox",
   "merchantAccountId": "default",
+  "paymentServiceId": "REPLACE_WITH_YOUR_PAYPAL_PAYMENT_SERVICE_ID",
   "privateKeyPath": "./private_key.pem",
   "port": 3000
 }
