@@ -9,6 +9,10 @@ The whole sample is ~100 lines of server code, ~100 lines of client JS, and
 one HTML file. Read it top-to-bottom and you should have a complete mental
 model of the integration.
 
+> **Looking for the no-transaction-on-load / one-click variant?** See
+> [`standalone/`](standalone/), which renders the button from a standalone
+> payment-service session and creates the transaction lazily on click.
+
 ---
 
 ## What you get

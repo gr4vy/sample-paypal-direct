@@ -1,0 +1,16 @@
+{
+  "name": "sample-standalone-paypal",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@gr4vy/sdk": "^2.0.43",
+    "express": "^4.21.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
