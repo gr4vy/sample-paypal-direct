@@ -1,10 +1,19 @@
-// Minimal Express server for the Gr4vy + PayPal direct-mode sample.
+// Minimal Express server for the Gr4vy + PayPal *standalone* session sample.
 //
-// Two responsibilities:
+// The point of this sample: render the PayPal Smart Button on page load with
+// ZERO transactions created. The transaction (and PayPal order) is created
+// lazily, only when the buyer clicks, inside PayPal's createOrder callback.
+//
+// Three responsibilities:
 //   1. Serve the static checkout page from /public.
-//   2. Wrap two Gr4vy API calls so the client never sees the private key:
-//        POST /transactions  -> creates the PayPal transaction
-//        GET  /transactions/:id -> fetches its current status
+//   2. GET  /paypal-session   -> standalone PayPal session (no transaction).
+//   3. POST /transactions     -> create the transaction lazily on click,
+//      GET  /transactions/:id -> fetch its status on return.
+//
+// The standalone session endpoint (POST /payment-services/{id}/sessions)
+// requires a full Gr4vy bearer token (scope transactions.write), so — unlike
+// the per-transaction session endpoint — it must be called server-side where
+// the private key lives. We proxy it through the Gr4vy SDK.
 
 import express from "express";
 import fs from "node:fs";
@@ -44,24 +53,49 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
 // Tells the client which Gr4vy API base URL to call directly for the
-// frontend-only session endpoint.
+// frontend-only per-transaction session endpoint (used in createOrder).
 app.get("/config", (_req, res) => {
   res.json({ apiUrl });
 });
 
-// Create a PayPal transaction in direct/web integration mode. The response
-// hands the client back two things:
+// Standalone PayPal session — returns the connector-held clientId and
+// merchantId WITHOUT creating a transaction or calling PayPal. This is what
+// lets the button render on page load with no side effects. The client picks
+// currency, intent, and funding source itself when loading the SDK.
+app.get("/paypal-session", async (_req, res) => {
+  try {
+    const session = await gr4vy.paymentServices.session({}, cfg.paymentServiceId);
+    // session.responseBody is { clientId, merchantId } — no orderId.
+    res.json(session.responseBody ?? {});
+  } catch (err) {
+    console.error("paymentServices.session failed:", err);
+    res.status(500).json({ error: String(err?.message ?? err) });
+  }
+});
+
+// Create a PayPal transaction in direct/web integration mode. Called lazily
+// from the browser inside createOrder when the buyer clicks the button. The
+// response hands the client back two things:
 //   - transactionId: the Gr4vy transaction we just created
 //   - sessionToken:  a short-lived token the client uses to fetch the
-//                    PayPal session data (orderId, clientId, ...) directly
-//                    from the Gr4vy API
+//                    per-transaction session (orderId, default_completion_url)
+//                    directly from the Gr4vy API
 app.post("/transactions", async (req, res) => {
-  const { amount = 1299, currency = "USD", country = "US" } = req.body ?? {};
+  const {
+    amount = 1299,
+    currency = "USD",
+    country = "US",
+    intent = "capture",
+  } = req.body ?? {};
   try {
     const tx = await gr4vy.transactions.create({
       amount,
       currency,
       country,
+      // Mirror the intent the client loaded the SDK with. Note the PayPal
+      // order's intent is ultimately governed by your PayPal connection's
+      // configuration, so the SDK intent must match that connection setting.
+      intent,
       integrationClient: "web",
       paymentMethod: {
         method: "paypal",
