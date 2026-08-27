@@ -55,6 +55,12 @@ By default the sample uses the `spider` sandbox
 To point at a different Gr4vy environment, copy `config.example.json` to
 `config.json` and edit. You **must** set `paymentServiceId` either way.
 
+Set `"local": true` in `config.json` to point the whole sample — the SDK
+client and the browser's per-transaction session calls — at a core-api
+you're running yourself (`make server` in `core-api`, `http://localhost:8000`)
+instead of a hosted Gr4vy environment. Useful for testing against connector
+changes that aren't deployed to sandbox yet.
+
 ---
 
 ## How it works, step by step
@@ -165,6 +171,64 @@ http://localhost:3000/?return=1
 
 On the return page, pick up `transaction_id` and call your server to display
 the result.
+
+---
+
+## Venmo — a second path, on PayPal's v6 Web SDK
+
+The page also renders a **Pay with Venmo** button. It skips step 1 (no
+standalone session — nothing to fetch before the buyer clicks) and replaces
+step 2's classic Smart Button with PayPal's **v6 Web SDK**
+(`web-sdk/v6/core`), a different, instance-based API
+(`createInstance` → `createVenmoOneTimePaymentSession` → `.start()`) loaded
+lazily on click and driven directly on this page.
+
+This is a deliberate choice: Gr4vy's connector repo ships its own hosted
+`paypal/venmo.html` that also runs the v6 SDK, but that page is a sandbox
+testing surface for the connector team, not a merchant integration pattern —
+so this sample runs the SDK itself instead of redirecting to it.
+
+The Venmo connector creates the PayPal order *eagerly*, inside
+`POST /transactions`, so step 3's per-transaction session call — the exact
+same endpoint the PayPal flow already uses — just hands back that order's
+`orderId` instead of a fresh one, plus the same `default_completion_url`
+used in step 4:
+
+```js
+async function payWithVenmo() {
+  const { transactionId, sessionToken } = await createTransaction({ method: "venmo" });
+  const { session_data, default_completion_url } =
+    await fetchTxSession(apiUrl, transactionId, sessionToken);
+
+  await loadVenmoSdk(); // https://www.sandbox.paypal.com/web-sdk/v6/core
+  const sdkInstance = await window.paypal.createInstance({
+    clientId: session_data.clientId,
+    clientMetadataId: crypto.randomUUID(),
+    components: ["venmo-payments"],
+    pageType: "checkout",
+  });
+
+  const venmoSession = sdkInstance.createVenmoOneTimePaymentSession({
+    onApprove: () => window.location.assign(default_completion_url),
+    onCancel: () => { /* append ?cancel=true to default_completion_url */ },
+    onError: (err) => setStatus(`Venmo error: ${err}`, "err"),
+  });
+
+  await venmoSession.start(
+    { presentationMode: "auto", sandboxSupport: { enabled: true } },
+    Promise.resolve({ orderId: session_data.orderId }),
+  );
+}
+```
+
+`sandboxSupport: { enabled: true }` and the `sandbox.paypal.com` SDK host are
+sandbox-only — drop the former and swap to `www.paypal.com/web-sdk/v6/core`
+for production.
+
+Requires a Venmo-enabled PayPal connection configured in your Gr4vy
+dashboard (Venmo is US buyers, USD only). No extra config on this sample —
+Gr4vy routes `method: "venmo"` to that connection automatically, the same way
+it already routes `method: "paypal"`.
 
 ---
 
