@@ -71,6 +71,36 @@ route this sample has over a plain transaction-first integration.
   via `window.paypal.FUNDING[...]`.
 - **In `onApprove`, navigate to `default_completion_url`. Do not `fetch()`
   it** — the redirect crosses origins and a fetch chain fails.
+- **Venmo uses PayPal's v6 Web SDK (`web-sdk/v6/core`), not the classic
+  `paypal.com/sdk/js`** — a different, instance-based API
+  (`createInstance` → `createVenmoOneTimePaymentSession` → `.start()`), and
+  we run it **ourselves, directly on this page**. The Venmo connector
+  (`paypal-venmo`, PR #7322 in the connectors repo, merged to main) creates
+  the PayPal order *eagerly* inside `POST /transactions` and also exposes an
+  `paymentMethod.approvalUrl` pointing at a page Gr4vy hosts
+  (`paypal/venmo.html`) that also runs the v6 SDK — **don't use that URL**.
+  It's a sandbox testing surface for the connectors team, not a documented
+  merchant integration path. Instead, fetch the per-transaction session (the
+  exact same `POST /transactions/:id/session?token=` call the PayPal flow
+  already makes) to get `session_data.clientId`/`orderId` and
+  `default_completion_url`, then drive the v6 SDK with those directly — same
+  completion mechanism as PayPal's `onApprove`, since `default_completion_url`
+  is the same Gr4vy-generated `approval_url` either way (confirmed via
+  `commands.py`'s `CreateTransaction.approval_url` docstring: "gr4vy approval
+  URL", not the merchant's raw `redirectUrl`).
+  `redirect_requires_popup: Yes` in the connector docs is generic
+  redirect-mode metadata, not a requirement here — neither connector sets
+  `approval_target`, which defaults to "no specific requirement", and the
+  v6 SDK's own popup/modal handling (`presentationMode: "auto"`) is what
+  actually manages the buyer-facing window.
+- **The classic SDK and the v6 SDK both claim `window.paypal`.** Since the
+  classic SDK loads first (on page load, for the button), v6 finds
+  `window.paypal` already occupied when it loads on Venmo click and doesn't
+  overwrite it with `createInstance` — `window.paypal.createInstance is not a
+  function`, silently. Fix: null out `window.paypal` right before injecting
+  the v6 script, capture whatever it writes into a separate variable, then
+  restore the classic object so the still-rendered button keeps working. See
+  `loadVenmoSdk()` in `public/index.html`.
 
 ## Config and secrets
 
@@ -81,6 +111,12 @@ route this sample has over a plain transaction-first integration.
 - `private_key.pem` is gitignored and required at runtime.
 - `.gitignore` covers `private_key.pem`, `config.json`, `.env`,
   `node_modules/`. **Never** commit a key or a populated `config.json`.
+- `"local": true` swaps `apiUrl` to `http://localhost:8000` (core-api's
+  `make server` default) and feeds it into the Gr4vy client as `serverURL`,
+  which core-api's `id`/`server` fields become irrelevant to at that point —
+  `serverURL` is checked first in the SDK's own config resolution
+  (`@gr4vy/sdk`'s `serverURLFromOptions`) and short-circuits the `id`/`server`
+  templating entirely. Default `false`.
 
 ## Running and testing
 

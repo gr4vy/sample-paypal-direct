@@ -10,6 +10,12 @@
 //   3. POST /transactions     -> create the transaction lazily on click,
 //      GET  /transactions/:id -> fetch its status on return.
 //
+// Venmo rides the same /transactions route (method: "venmo" instead of
+// "paypal"). It needs no standalone session, but it does need the same
+// per-transaction session step PayPal uses — the connector creates the
+// PayPal order eagerly, so that call just hands back its orderId. The
+// browser then drives PayPal's v6 Web SDK directly — see public/index.html.
+//
 // The standalone session endpoint (POST /payment-services/{id}/sessions)
 // requires a full Gr4vy bearer token (scope transactions.write), so — unlike
 // the per-transaction session endpoint — it must be called server-side where
@@ -31,16 +37,22 @@ const cfgPath = fs.existsSync(path.join(__dirname, "config.json"))
   : path.join(__dirname, "config.example.json");
 const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
 
-const apiUrl =
-  cfg.server === "production"
+// `local: true` points the whole sample at a core-api you're running
+// yourself (`make server` in core-api, http://localhost:8000) instead of a
+// hosted Gr4vy environment — handy for testing against connector changes
+// that aren't deployed to sandbox yet. Defaults to false.
+const apiUrl = cfg.local
+  ? "http://localhost:8000"
+  : cfg.server === "production"
     ? `https://api.${cfg.gr4vyId}.gr4vy.app`
     : `https://api.sandbox.${cfg.gr4vyId}.gr4vy.app`;
 
 // --- Gr4vy SDK client -----------------------------------------------------
-// `withToken` signs a JWT from the private key on each request.
+// `withToken` signs a JWT from the private key on each request. serverURL
+// takes the already-resolved apiUrl directly, so this one client works the
+// same way whether it's talking to sandbox, production, or local core-api.
 const gr4vy = new Gr4vy({
-  id: cfg.gr4vyId,
-  server: cfg.server,
+  serverURL: apiUrl,
   merchantAccountId: cfg.merchantAccountId,
   bearerAuth: withToken({
     privateKey: fs.readFileSync(cfg.privateKeyPath, "utf8"),
@@ -73,19 +85,21 @@ app.get("/paypal-session", async (_req, res) => {
   }
 });
 
-// Create a PayPal transaction in direct/web integration mode. Called lazily
-// from the browser inside createOrder when the buyer clicks the button. The
-// response hands the client back two things:
-//   - transactionId: the Gr4vy transaction we just created
-//   - sessionToken:  a short-lived token the client uses to fetch the
-//                    per-transaction session (orderId, default_completion_url)
-//                    directly from the Gr4vy API
+// Create a PayPal or Venmo transaction in direct/web integration mode.
+// Called lazily from the browser when the buyer clicks a button. Both
+// methods hand back the same two things — the transaction id and a
+// short-lived sessionToken the browser uses to fetch the per-transaction
+// session (orderId + default_completion_url) directly from the Gr4vy API.
+// Venmo's order already exists by the time this returns (the connector
+// creates it eagerly), but the session step is still how the browser learns
+// its orderId — same endpoint, same shape, as the PayPal flow.
 app.post("/transactions", async (req, res) => {
   const {
     amount = 1299,
     currency = "USD",
     country = "US",
     intent = "capture",
+    method = "paypal",
   } = req.body ?? {};
   try {
     const tx = await gr4vy.transactions.create({
@@ -98,10 +112,10 @@ app.post("/transactions", async (req, res) => {
       intent,
       integrationClient: "web",
       paymentMethod: {
-        method: "paypal",
+        method,
         country,
         currency,
-        // Where Gr4vy will send the buyer after the PayPal flow completes.
+        // Where Gr4vy will send the buyer after the PayPal/Venmo flow completes.
         redirectUrl: `http://localhost:${cfg.port}/?return=1`,
       },
     });

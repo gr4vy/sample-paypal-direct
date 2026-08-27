@@ -46,6 +46,19 @@
       }
       .price { font-size: 1.2rem; font-weight: 600; }
       #paypal-button-container { margin-top: 1rem; min-height: 50px; }
+      #venmo-button {
+        margin-top: 0.5rem;
+        width: 100%;
+        padding: 0.75rem;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: #008cff;
+        color: #ffffff;
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      #venmo-button:disabled { opacity: 0.6; cursor: default; }
       #status {
         margin-top: 1rem;
         padding: 0.75rem;
@@ -67,6 +80,7 @@
       <div class="price">$12.99 USD</div>
     </div>
     <div id="paypal-button-container"></div>
+    <button id="venmo-button" type="button">Pay with Venmo</button>
     <div id="status" hidden></div>
 
     <script>
@@ -90,10 +104,22 @@
       //      303-redirects back with the transaction result in the query
       //      string.
       //   5. On return, the page fetches the transaction status and shows it.
+      //
+      // Venmo is a second path that shares steps 3 and 5. It skips step 1
+      // (no standalone session — nothing to fetch before the buyer clicks)
+      // and replaces step 2's classic Smart Button with PayPal's v6 Web SDK,
+      // loaded lazily on click and driven directly on this page — not via
+      // Gr4vy's own hosted `paypal/venmo.html`, which is a sandbox testing
+      // page for the connector team, not a merchant integration surface.
+      // The Venmo connector creates the PayPal order eagerly inside
+      // POST /transactions, so step 3's per-transaction session call (the
+      // same one PayPal uses) hands back its orderId directly instead of a
+      // fresh one. From there it's the same defaultCompletionUrl as step 4.
       // -----------------------------------------------------------------
 
       const statusEl = document.getElementById("status");
       const buttonContainer = document.getElementById("paypal-button-container");
+      const venmoButton = document.getElementById("venmo-button");
 
       // The client chooses these — they are not part of the standalone session,
       // which only returns the clientId and merchantId. INTENT must match the
@@ -103,6 +129,14 @@
       const CURRENCY = "USD";
       const INTENT = "authorize";
       const FUNDING_SOURCE = "paypal.FUNDING.PAYPAL";
+
+      // PayPal's v6 Web SDK, for Venmo. Separate SDK, separate script tag,
+      // separate API from the classic paypal.com/sdk/js above — this one is
+      // instance-based (createInstance -> createVenmoOneTimePaymentSession)
+      // rather than a rendered component. Sandbox host, matching the rest of
+      // this sample; swap for https://www.paypal.com/web-sdk/v6/core (and
+      // drop sandboxSupport below) in production.
+      const VENMO_SDK_URL = "https://www.sandbox.paypal.com/web-sdk/v6/core";
 
       function setStatus(msg, kind) {
         statusEl.hidden = false;
@@ -183,6 +217,95 @@
         return session_data.orderId;
       }
 
+      // Load the v6 SDK once and cache the promise — repeat clicks reuse it.
+      //
+      // Both PayPal SDKs claim the same `window.paypal` global. The classic
+      // SDK is already sitting there by the time we load this one (it loaded
+      // on page load, to render the button), so v6 finds it occupied and
+      // doesn't overwrite it with createInstance — window.paypal silently
+      // stays the classic SDK's object. Clear the slot right before loading
+      // v6, capture what it writes into our own variable, then put the
+      // classic object back so the still-visible button keeps working.
+      let venmoSdkPromise = null;
+      let venmoSdk = null;
+      function loadVenmoSdk() {
+        if (!venmoSdkPromise) {
+          venmoSdkPromise = new Promise((resolve, reject) => {
+            const classicPaypal = window.paypal;
+            window.paypal = undefined;
+            const s = document.createElement("script");
+            s.src = VENMO_SDK_URL;
+            s.onload = () => {
+              venmoSdk = window.paypal;
+              window.paypal = classicPaypal;
+              resolve();
+            };
+            s.onerror = () => {
+              window.paypal = classicPaypal;
+              reject(new Error("PayPal v6 SDK failed to load"));
+            };
+            document.head.appendChild(s);
+          });
+        }
+        return venmoSdkPromise;
+      }
+
+      // Venmo — create the transaction, fetch its per-transaction session
+      // (steps identical to createOrderLazily above; the order already
+      // exists, so this just hands back its orderId), then drive the v6 SDK
+      // ourselves. INTENT must match the *Venmo* connection's configured
+      // intent, which may differ from the PayPal connection's.
+      async function payWithVenmo() {
+        const txRes = await fetch("/transactions", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            amount: 1299,
+            currency: CURRENCY,
+            country: "US",
+            intent: INTENT,
+            method: "venmo",
+          }),
+        });
+        if (!txRes.ok) throw new Error(`POST /transactions ${txRes.status}`);
+        const { transactionId, sessionToken } = await txRes.json();
+
+        const { apiUrl } = await (await fetch("/config")).json();
+        const sessUrl =
+          `${apiUrl}/transactions/${transactionId}/session` +
+          `?token=${encodeURIComponent(sessionToken)}`;
+        const sessRes = await fetch(sessUrl, { method: "POST" });
+        if (!sessRes.ok) throw new Error(`session ${sessRes.status}`);
+        const { session_data, default_completion_url } = await sessRes.json();
+
+        setStatus("Loading Venmo...");
+        await loadVenmoSdk();
+        const sdkInstance = await venmoSdk.createInstance({
+          clientId: session_data.clientId,
+          clientMetadataId: crypto.randomUUID(),
+          components: ["venmo-payments"],
+          pageType: "checkout",
+        });
+
+        const venmoSession = sdkInstance.createVenmoOneTimePaymentSession({
+          onApprove: async () => {
+            setStatus("Completing transaction...");
+            window.location.assign(default_completion_url);
+          },
+          onCancel: () => {
+            const url = new URL(default_completion_url);
+            url.searchParams.set("cancel", "true");
+            window.location.assign(url.toString());
+          },
+          onError: (err) => setStatus(`Venmo error: ${err?.message || err}`, "err"),
+        });
+
+        await venmoSession.start(
+          { presentationMode: "auto", sandboxSupport: { enabled: true } },
+          Promise.resolve({ orderId: session_data.orderId }),
+        );
+      }
+
       // Step 5 — display the final transaction status on return from PayPal.
       async function showFinalStatus(transactionId) {
         try {
@@ -200,6 +323,7 @@
         const returnedTxId = new URLSearchParams(location.search).get("transaction_id");
         if (returnedTxId) {
           buttonContainer.hidden = true;
+          venmoButton.hidden = true;
           setStatus(`Fetching transaction ${returnedTxId}...`);
           await showFinalStatus(returnedTxId);
           return;
@@ -251,6 +375,17 @@
           setStatus(`Error: ${err.message}`, "err");
         }
       }
+
+      venmoButton.addEventListener("click", async () => {
+        venmoButton.disabled = true;
+        try {
+          setStatus("Creating order...");
+          await payWithVenmo();
+        } catch (err) {
+          setStatus(`Error: ${err.message}`, "err");
+          venmoButton.disabled = false;
+        }
+      });
 
       init();
     </script>
