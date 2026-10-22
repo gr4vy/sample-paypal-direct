@@ -138,7 +138,10 @@ app.get("/transactions/:id", async (req, res) => {
   }
 });
 
-app.listen(cfg.port, () => {
+// Express 5 hands listen errors (e.g. EADDRINUSE) to this callback instead of
+// crashing, so rethrow rather than claim we're listening.
+app.listen(cfg.port, (err) => {
+  if (err) throw err;
   console.log(`Sample listening on http://localhost:${cfg.port}`);
   console.log(`Using Gr4vy API at ${apiUrl} (merchant=${cfg.merchantAccountId})`);
 });
