@@ -7,8 +7,8 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "@gr4vy/sdk": "^2.0.43",
-    "express": "^4.21.1"
+    "@gr4vy/sdk": "^2.4.37",
+    "express": "^4.22.3"
   },
   "engines": {
     "node": ">=20"
